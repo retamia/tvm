@@ -18,6 +18,7 @@ import numpy as np
 import pytest
 
 import tvm
+from tvm import te
 from tvm import relay
 from tvm.relay.testing import check_grad, ctx_list, run_infer_type
 from tvm.relay.transform import gradient
@@ -63,7 +64,17 @@ def test_unary_op():
                         (relay.nn.relu, lambda x: np.where(x < 0, np.zeros_like(x), np.ones_like(x))),
                         (tvm.relay.cos, lambda x: -1.0 * np.sin(x)),
                         (tvm.relay.sin, lambda x: np.cos(x)),
-                        (tvm.relay.atan, lambda x: 1 / (1 + np.power(x, 2.0)))]:
+                        (tvm.relay.tan, lambda x: 1.0 / (np.cos(x) ** 2)),
+                        (tvm.relay.atan, lambda x: 1 / (1 + np.power(x, 2.0))),
+                        (tvm.relay.log2, lambda x: 1 / (np.log(2) * x)),
+                        (tvm.relay.log10, lambda x: 1 / (np.log(10) * x)),
+                        (tvm.relay.cosh, lambda x: np.sinh(x)),
+                        (tvm.relay.sinh, lambda x: np.cosh(x)),
+                        (tvm.relay.asin, lambda x: 1. / (1. - x**2) ** (1./2.)),
+                        (tvm.relay.acos, lambda x: -1. / (1. - x**2.) ** (1./2.)),
+                        (tvm.relay.acosh, lambda x: 1./ (x**2 - 1.)**(1./2.)),
+                        (tvm.relay.asinh, lambda x: 1./ (x**2 + 1.)**(1./2.)),
+                        (tvm.relay.atanh, lambda x: -1./ (x**2 - 1.))]:
         check_single_op(opfunc, ref)
 
 
@@ -110,11 +121,18 @@ def test_log_softmax_grad():
     check_grad(fwd_func, scale=1)
 
 
-def test_bias_add_grad():
-    data = relay.var("data", relay.TensorType((1, 16), "float32"))
-    bias = relay.var("bias", relay.TensorType((16,), "float32"))
-    fwd_func = relay.Function([data, bias], relay.nn.bias_add(data, bias))
+def verify_bias_add(d_shape, b_shape, axis=1):
+    data = relay.var("data", relay.TensorType(d_shape, "float32"))
+    bias = relay.var("bias", relay.TensorType(b_shape, "float32"))
+    fwd_func = relay.Function([data, bias], relay.nn.bias_add(data, bias, axis=axis))
     check_grad(fwd_func)
+
+
+def test_bias_add_grad():
+    verify_bias_add((1, 16), (16,))
+    verify_bias_add((1, 8, 2, 2), (8,))
+    verify_bias_add((1, 2, 2, 8), (8,), 3)
+    verify_bias_add((4, 8), (8,))
 
 
 if __name__ == "__main__":

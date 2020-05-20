@@ -22,11 +22,15 @@
  */
 #include <dmlc/logging.h>
 #include <tvm/runtime/object.h>
+#include <tvm/runtime/registry.h>
+
 #include <mutex>
 #include <string>
-#include <vector>
-#include <utility>
 #include <unordered_map>
+#include <utility>
+#include <vector>
+
+#include "object_internal.h"
 #include "runtime_base.h"
 
 namespace tvm {
@@ -73,10 +77,8 @@ class TypeContext {
     return child_tindex == parent_tindex;
   }
 
-  uint32_t GetOrAllocRuntimeTypeIndex(const std::string& skey,
-                                      uint32_t static_tindex,
-                                      uint32_t parent_tindex,
-                                      uint32_t num_child_slots,
+  uint32_t GetOrAllocRuntimeTypeIndex(const std::string& skey, uint32_t static_tindex,
+                                      uint32_t parent_tindex, uint32_t num_child_slots,
                                       bool child_slots_can_overflow) {
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = type_key2index_.find(skey);
@@ -84,7 +86,8 @@ class TypeContext {
       return it->second;
     }
     // try to allocate from parent's type table.
-    CHECK_LT(parent_tindex, type_table_.size());
+    CHECK_LT(parent_tindex, type_table_.size())
+        << " skey= " << skey << "static_index=" << static_tindex;
     TypeInfo& pinfo = type_table_[parent_tindex];
     CHECK_EQ(pinfo.index, parent_tindex);
 
@@ -102,11 +105,9 @@ class TypeContext {
       allocated_tindex = static_tindex;
       CHECK_LT(static_tindex, type_table_.size());
       CHECK_EQ(type_table_[allocated_tindex].allocated_slots, 0U)
-          << "Conflicting static index " << static_tindex
-          << " between " << type_table_[allocated_tindex].name
-          << " and "
-          << skey;
-    } else if (pinfo.allocated_slots + num_slots < pinfo.num_slots) {
+          << "Conflicting static index " << static_tindex << " between "
+          << type_table_[allocated_tindex].name << " and " << skey;
+    } else if (pinfo.allocated_slots + num_slots <= pinfo.num_slots) {
       // allocate the slot from parent's reserved pool
       allocated_tindex = parent_tindex + pinfo.allocated_slots;
       // update parent's state
@@ -117,8 +118,8 @@ class TypeContext {
       // allocate new entries.
       allocated_tindex = type_counter_;
       type_counter_ += num_slots;
-      CHECK_LE(type_table_.size(), allocated_tindex);
-      type_table_.resize(allocated_tindex + 1, TypeInfo());
+      CHECK_LE(type_table_.size(), type_counter_);
+      type_table_.resize(type_counter_, TypeInfo());
     }
     CHECK_GT(allocated_tindex, parent_tindex);
     // initialize the slot.
@@ -126,8 +127,7 @@ class TypeContext {
     type_table_[allocated_tindex].parent_index = parent_tindex;
     type_table_[allocated_tindex].num_slots = num_slots;
     type_table_[allocated_tindex].allocated_slots = 1;
-    type_table_[allocated_tindex].child_slots_can_overflow =
-        child_slots_can_overflow;
+    type_table_[allocated_tindex].child_slots_can_overflow = child_slots_can_overflow;
     type_table_[allocated_tindex].name = skey;
     type_table_[allocated_tindex].name_hash = std::hash<std::string>()(skey);
     // update the key2index mapping.
@@ -137,16 +137,14 @@ class TypeContext {
 
   std::string TypeIndex2Key(uint32_t tindex) {
     std::lock_guard<std::mutex> lock(mutex_);
-    CHECK(tindex < type_table_.size() &&
-          type_table_[tindex].allocated_slots != 0)
+    CHECK(tindex < type_table_.size() && type_table_[tindex].allocated_slots != 0)
         << "Unknown type index " << tindex;
     return type_table_[tindex].name;
   }
 
   size_t TypeIndex2KeyHash(uint32_t tindex) {
     std::lock_guard<std::mutex> lock(mutex_);
-    CHECK(tindex < type_table_.size() &&
-          type_table_[tindex].allocated_slots != 0)
+    CHECK(tindex < type_table_.size() && type_table_[tindex].allocated_slots != 0)
         << "Unknown type index " << tindex;
     return type_table_[tindex].name_hash;
   }
@@ -154,8 +152,28 @@ class TypeContext {
   uint32_t TypeKey2Index(const std::string& skey) {
     auto it = type_key2index_.find(skey);
     CHECK(it != type_key2index_.end())
-        << "Cannot find type " << skey;
+        << "Cannot find type " << skey
+        << ". Did you forget to register the node by TVM_REGISTER_NODE_TYPE ?";
     return it->second;
+  }
+
+  void Dump(int min_children_count) {
+    std::vector<int> num_children(type_table_.size(), 0);
+    // reverse accumulation so we can get total counts in a bottom-up manner.
+    for (auto it = type_table_.rbegin(); it != type_table_.rend(); ++it) {
+      if (it->index != 0) {
+        num_children[it->parent_index] += num_children[it->index] + 1;
+      }
+    }
+
+    for (const auto& info : type_table_) {
+      if (info.index != 0 && num_children[info.index] >= min_children_count) {
+        std::cerr << '[' << info.index << "] " << info.name
+                  << "\tparent=" << type_table_[info.parent_index].name
+                  << "\tnum_child_slots=" << info.num_slots - 1
+                  << "\tnum_children=" << num_children[info.index] << std::endl;
+      }
+    }
   }
 
   static TypeContext* Global() {
@@ -166,6 +184,7 @@ class TypeContext {
  private:
   TypeContext() {
     type_table_.resize(TypeIndex::kStaticIndexEnd, TypeInfo());
+    type_table_[0].name = "runtime.Object";
   }
   // mutex to avoid registration from multiple threads.
   std::mutex mutex_;
@@ -174,18 +193,15 @@ class TypeContext {
   std::unordered_map<std::string, uint32_t> type_key2index_;
 };
 
-uint32_t Object::GetOrAllocRuntimeTypeIndex(const std::string& key,
-                                            uint32_t static_tindex,
-                                            uint32_t parent_tindex,
-                                            uint32_t num_child_slots,
+uint32_t Object::GetOrAllocRuntimeTypeIndex(const std::string& key, uint32_t static_tindex,
+                                            uint32_t parent_tindex, uint32_t num_child_slots,
                                             bool child_slots_can_overflow) {
   return TypeContext::Global()->GetOrAllocRuntimeTypeIndex(
       key, static_tindex, parent_tindex, num_child_slots, child_slots_can_overflow);
 }
 
 bool Object::DerivedFrom(uint32_t parent_tindex) const {
-  return TypeContext::Global()->DerivedFrom(
-      this->type_index_, parent_tindex);
+  return TypeContext::Global()->DerivedFrom(this->type_index_, parent_tindex);
 }
 
 std::string Object::TypeIndex2Key(uint32_t tindex) {
@@ -200,18 +216,13 @@ uint32_t Object::TypeKey2Index(const std::string& key) {
   return TypeContext::Global()->TypeKey2Index(key);
 }
 
-class TVMObjectCAPI {
- public:
-  static void Free(TVMObjectHandle obj) {
-    if (obj != nullptr) {
-      static_cast<Object*>(obj)->DecRef();
-    }
-  }
+TVM_REGISTER_GLOBAL("runtime.ObjectHash").set_body_typed([](ObjectRef obj) {
+  return static_cast<int64_t>(ObjectHash()(obj));
+});
 
-  static uint32_t TypeKey2Index(const std::string& type_key) {
-    return Object::TypeKey2Index(type_key);
-  }
-};
+TVM_REGISTER_GLOBAL("runtime.DumpTypeTable").set_body_typed([](int min_child_count) {
+  TypeContext::Global()->Dump(min_child_count);
+});
 }  // namespace runtime
 }  // namespace tvm
 
@@ -224,13 +235,12 @@ int TVMObjectGetTypeIndex(TVMObjectHandle obj, unsigned* out_tindex) {
 
 int TVMObjectFree(TVMObjectHandle obj) {
   API_BEGIN();
-  tvm::runtime::TVMObjectCAPI::Free(obj);
+  tvm::runtime::ObjectInternal::ObjectFree(obj);
   API_END();
 }
 
 int TVMObjectTypeKey2Index(const char* type_key, unsigned* out_tindex) {
   API_BEGIN();
-  out_tindex[0] = tvm::runtime::TVMObjectCAPI::TypeKey2Index(
-      type_key);
+  out_tindex[0] = tvm::runtime::ObjectInternal::ObjectTypeKey2Index(type_key);
   API_END();
 }

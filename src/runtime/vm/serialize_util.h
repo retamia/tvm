@@ -18,7 +18,6 @@
  */
 
 /*!
- *  Copyright (c) 2019 by Contributors
  * \file src/runtime/vm/serialize_util.h
  * \brief Definitions of helpers for serializing and deserializing a Relay VM.
  */
@@ -61,9 +60,7 @@ struct VMFunctionSerializer {
 
   VMFunctionSerializer() = default;
 
-  VMFunctionSerializer(const std::string& name,
-                       Index register_file_size,
-                       size_t num_instructions,
+  VMFunctionSerializer(const std::string& name, Index register_file_size, size_t num_instructions,
                        const std::vector<std::string>& params)
       : name(name),
         register_file_size(register_file_size),
@@ -88,7 +85,7 @@ struct VMFunctionSerializer {
   }
 
   /*!
-   * \brief Save the VM function header into the serialized form. 
+   * \brief Save the VM function header into the serialized form.
    * \param strm The stream used to save data.
    */
   void Save(dmlc::Stream* strm) const {
@@ -109,11 +106,11 @@ struct VMInstructionSerializer {
 
   VMInstructionSerializer() = default;
 
-  VMInstructionSerializer(Index opcode, const std::vector<Index>& fields) :
-    opcode(opcode), fields(fields) {}
+  VMInstructionSerializer(Index opcode, const std::vector<Index>& fields)
+      : opcode(opcode), fields(fields) {}
 
   /*!
-   * \brief Compute the hash of the serialized instruction. 
+   * \brief Compute the hash of the serialized instruction.
    * \return The hash that combines the opcode and all fields of the VM
    * instruction.
    */
@@ -140,13 +137,12 @@ struct VMInstructionSerializer {
     }
 
     Index hash = Hash();
-    CHECK_EQ(loaded_hash, hash) << "Found mismatch in hash for opcode: "
-                                << opcode << "\n";
+    CHECK_EQ(loaded_hash, hash) << "Found mismatch in hash for opcode: " << opcode << "\n";
     return true;
   }
 
   /*!
-   * \brief Save the instruction into the serialized form. 
+   * \brief Save the instruction into the serialized form.
    * \param strm The stream used to save data.
    */
   void Save(dmlc::Stream* strm) const {
